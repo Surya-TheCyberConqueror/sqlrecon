@@ -1,0 +1,99 @@
+#!/bin/bash
+
+# ==================================================
+# SQLRecon – Numeric SQL Injection Endpoint Recon
+# Created by Surya – The Cyber Conqueror
+# ==================================================
+
+RED="\e[31m"
+CYAN="\e[36m"
+BOLD="\e[1m"
+RESET="\e[0m"
+
+usage() {
+  echo "Usage: sqlrecon -u <url>"
+  exit 1
+}
+
+# -------- ARGUMENT PARSING --------
+while getopts ":u:" opt; do
+  case $opt in
+    u) START_URL="$OPTARG" ;;
+    *) usage ;;
+  esac
+done
+
+[[ -z "$START_URL" ]] && usage
+
+BASE_SCHEME=$(echo "$START_URL" | awk -F:// '{print $1}')
+BASE_HOST=$(echo "$START_URL" | awk -F/ '{print $3}')
+BASE_ROOT="$BASE_SCHEME://$BASE_HOST"
+
+declare -A VISITED
+QUEUE=("$START_URL")
+MAX_LINKS=120
+COUNT=0
+
+echo -e "${CYAN}${BOLD}"
+echo "=============================================="
+echo "                 SQLRecon"
+echo " Numeric SQL Injection Endpoint Recon Tool"
+echo " Created by Surya – The Cyber Conqueror"
+echo "=============================================="
+echo -e "${RESET}"
+
+while [[ ${#QUEUE[@]} -gt 0 && $COUNT -lt $MAX_LINKS ]]; do
+  URL="${QUEUE[0]}"
+  QUEUE=("${QUEUE[@]:1}")
+
+  [[ -n "${VISITED[$URL]}" ]] && continue
+  VISITED["$URL"]=1
+  ((COUNT++))
+
+  echo -e "${CYAN}[VISITING]${RESET} $URL"
+
+  # ---- Skip non-HTML content ----
+  CONTENT_TYPE=$(curl -skI --max-time 5 "$URL" | tr -d '\r' | grep -i '^Content-Type:')
+  if ! echo "$CONTENT_TYPE" | grep -qi 'text/html'; then
+    continue
+  fi
+
+  HTML=$(curl -skL --max-time 5 "$URL" | tr -d '\000')
+  [[ -z "$HTML" ]] && continue
+
+  # ---- HIGH VALUE: numeric parameters ONLY ----
+  if echo "$URL" | grep -Eq '\?.*=[0-9]+'; then
+    echo -e "${RED}${BOLD}[HIGH VALUE SQLi ENDPOINT]${RESET} $URL"
+  fi
+
+  # ---- Extract and queue links ----
+  while read -r link; do
+    [[ -z "$link" ]] && continue
+    [[ "$link" =~ ^#|^javascript:|^mailto: ]] && continue
+
+    if [[ "$link" =~ ^http ]]; then
+      HOST=$(echo "$link" | awk -F/ '{print $3}')
+      [[ "$HOST" == "$BASE_HOST" ]] && QUEUE+=("$link")
+
+    elif [[ "$link" =~ ^/ ]]; then
+      QUEUE+=("$BASE_ROOT$link")
+
+    else
+      QUEUE+=("$BASE_ROOT/$link")
+    fi
+
+  done < <(
+    echo "$HTML" \
+    | grep -Eoi '(href|src)=["'\''][^"'\'']+' \
+    | sed -E 's/^(href|src)=["'\'']//g'
+  )
+
+done
+
+echo
+echo -e "${BOLD}==============================================${RESET}"
+echo -e "${CYAN}[*] HIGH VALUE = numeric parameters only (?id=1)${RESET}"
+echo -e "${CYAN}[*] Crawled URLs: $COUNT${RESET}"
+echo -e "${CYAN}[*] Optimized for SQL Injection reconnaissance${RESET}"
+echo -e "${CYAN}[*] Use Burp / sqlmap for exploitation${RESET}"
+echo -e "${BOLD}==============================================${RESET}"

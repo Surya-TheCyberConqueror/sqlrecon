@@ -1,99 +1,259 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# ==================================================
-# SQLRecon – Numeric SQL Injection Endpoint Recon
-# Created by Surya – The Cyber Conqueror
-# ==================================================
+# =========================================================
+# SQLRecon Pro — SQL Injection Reconnaissance Crawler
+# Created by Surya — The Cyber Conqueror
+# =========================================================
 
+set -euo pipefail
+
+# ================= COLORS =================
 RED="\e[31m"
+GREEN="\e[32m"
+YELLOW="\e[33m"
+BLUE="\e[34m"
 CYAN="\e[36m"
 BOLD="\e[1m"
 RESET="\e[0m"
 
-usage() {
-  echo "Usage: sqlrecon -u <url>"
-  exit 1
+# ================= CONFIG =================
+MAX_LINKS=300
+TIMEOUT=8
+USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) SQLReconPro/1.0"
+
+declare -A VISITED
+declare -A QUEUED
+
+FOUND=0
+CRAWLED=0
+
+# ================= BANNER =================
+banner() {
+echo -e "${CYAN}${BOLD}"
+cat << "EOF"
+
+   _____ ____  __    ____                           
+  / ___// __ \/ /   / __ \___  _________  ____      
+  \__ \/ / / / /   / /_/ / _ \/ ___/ __ \/ __ \     
+ ___/ / /_/ / /___/ _, _/  __/ /__/ /_/ / / / /     
+/____/\___\_\_____/_/ |_|\___/\___/\____/_/ /_/      
+
+      SQL Injection Reconnaissance Framework
+          Created by Surya — Cyber Conqueror
+
+EOF
+echo -e "${RESET}"
 }
 
-# -------- ARGUMENT PARSING --------
+# ================= USAGE =================
+usage() {
+echo
+echo "Usage:"
+echo "  sqlrecon -u <url>"
+echo
+echo "Example:"
+echo "  sqlrecon -u https://example.com"
+echo
+exit 1
+}
+
+# ================= URL NORMALIZATION =================
+normalize_url() {
+
+local url="$1"
+
+# remove fragments
+url="${url%%#*}"
+
+# remove duplicate slashes
+url=$(echo "$url" | sed 's#//*#/#g' | sed 's#:/#://#')
+
+# remove trailing slash
+[[ "$url" != "/" ]] && url="${url%/}"
+
+echo "$url"
+}
+
+# ================= ABSOLUTE URL RESOLVER =================
+resolve_url() {
+
+local current="$1"
+local link="$2"
+
+# absolute
+if [[ "$link" =~ ^https?:// ]]; then
+echo "$link"
+return
+fi
+
+# protocol-relative
+if [[ "$link" =~ ^// ]]; then
+echo "${BASE_SCHEME}:$link"
+return
+fi
+
+# root-relative
+if [[ "$link" =~ ^/ ]]; then
+echo "${BASE_ROOT}${link}"
+return
+fi
+
+# relative paths
+python3 - <<EOF
+from urllib.parse import urljoin
+print(urljoin("$current", "$link"))
+EOF
+}
+
+# ================= VALIDATION =================
+is_same_domain() {
+
+local host
+host=$(echo "$1" | awk -F/ '{print $3}')
+
+[[ "$host" == "$BASE_HOST" ]]
+}
+
+# ================= SQL PARAM DETECTION =================
+detect_sqli_params() {
+
+local url="$1"
+
+if echo "$url" | grep -Eqi '\?.*=[0-9]+(&|$)'; then
+
+echo -e "${RED}${BOLD}[POTENTIAL SQLi PARAM]${RESET} $url"
+
+((FOUND++))
+
+fi
+}
+
+# ================= FETCH HTML =================
+fetch_html() {
+
+curl -skL \
+--connect-timeout 4 \
+--max-time "$TIMEOUT" \
+-A "$USER_AGENT" \
+"$1" 2>/dev/null | tr -d '\000'
+}
+
+# ================= CONTENT TYPE =================
+is_html() {
+
+local type
+
+type=$(curl -skI \
+--connect-timeout 4 \
+--max-time "$TIMEOUT" \
+-A "$USER_AGENT" \
+"$1" 2>/dev/null | tr -d '\r')
+
+echo "$type" | grep -qi "text/html"
+}
+
+# ================= LINK EXTRACTION =================
+extract_links() {
+
+grep -Eoi '<a [^>]+href=["'"'"'][^"'"'"']+' \
+| sed -E 's/.*href=["'"'"']//'
+}
+
+# ================= MAIN =================
+
 while getopts ":u:" opt; do
-  case $opt in
-    u) START_URL="$OPTARG" ;;
-    *) usage ;;
-  esac
+case $opt in
+u) START_URL="$OPTARG" ;;
+*) usage ;;
+esac
 done
 
-[[ -z "$START_URL" ]] && usage
+[[ -z "${START_URL:-}" ]] && usage
+
+START_URL=$(normalize_url "$START_URL")
 
 BASE_SCHEME=$(echo "$START_URL" | awk -F:// '{print $1}')
 BASE_HOST=$(echo "$START_URL" | awk -F/ '{print $3}')
-BASE_ROOT="$BASE_SCHEME://$BASE_HOST"
+BASE_ROOT="${BASE_SCHEME}://${BASE_HOST}"
 
-declare -A VISITED
+banner
+
+echo -e "${GREEN}[TARGET]${RESET} $START_URL"
+echo
+
 QUEUE=("$START_URL")
-MAX_LINKS=120
-COUNT=0
+QUEUED["$START_URL"]=1
 
-echo -e "${CYAN}${BOLD}"
-echo "=============================================="
-echo "                 SQLRecon"
-echo " Numeric SQL Injection Endpoint Recon Tool"
-echo " Created by Surya – The Cyber Conqueror"
-echo "=============================================="
-echo -e "${RESET}"
+while [[ ${#QUEUE[@]} -gt 0 && $CRAWLED -lt $MAX_LINKS ]]; do
 
-while [[ ${#QUEUE[@]} -gt 0 && $COUNT -lt $MAX_LINKS ]]; do
-  URL="${QUEUE[0]}"
-  QUEUE=("${QUEUE[@]:1}")
+CURRENT="${QUEUE[0]}"
+QUEUE=("${QUEUE[@]:1}")
 
-  [[ -n "${VISITED[$URL]}" ]] && continue
-  VISITED["$URL"]=1
-  ((COUNT++))
+CURRENT=$(normalize_url "$CURRENT")
 
-  echo -e "${CYAN}[VISITING]${RESET} $URL"
+[[ -n "${VISITED[$CURRENT]:-}" ]] && continue
 
-  # ---- Skip non-HTML content ----
-  CONTENT_TYPE=$(curl -skI --max-time 5 "$URL" | tr -d '\r' | grep -i '^Content-Type:')
-  if ! echo "$CONTENT_TYPE" | grep -qi 'text/html'; then
-    continue
-  fi
+VISITED["$CURRENT"]=1
 
-  HTML=$(curl -skL --max-time 5 "$URL" | tr -d '\000')
-  [[ -z "$HTML" ]] && continue
+((CRAWLED++))
 
-  # ---- HIGH VALUE: numeric parameters ONLY ----
-  if echo "$URL" | grep -Eq '\?.*=[0-9]+'; then
-    echo -e "${RED}${BOLD}[HIGH VALUE SQLi ENDPOINT]${RESET} $URL"
-  fi
+echo -e "${CYAN}[CRAWLING]${RESET} $CURRENT"
 
-  # ---- Extract and queue links ----
-  while read -r link; do
-    [[ -z "$link" ]] && continue
-    [[ "$link" =~ ^#|^javascript:|^mailto: ]] && continue
+# check HTML
+if ! is_html "$CURRENT"; then
+continue
+fi
 
-    if [[ "$link" =~ ^http ]]; then
-      HOST=$(echo "$link" | awk -F/ '{print $3}')
-      [[ "$HOST" == "$BASE_HOST" ]] && QUEUE+=("$link")
+HTML=$(fetch_html "$CURRENT")
 
-    elif [[ "$link" =~ ^/ ]]; then
-      QUEUE+=("$BASE_ROOT$link")
+[[ -z "$HTML" ]] && continue
 
-    else
-      QUEUE+=("$BASE_ROOT/$link")
-    fi
+# detect params
+detect_sqli_params "$CURRENT"
 
-  done < <(
-    echo "$HTML" \
-    | grep -Eoi '(href|src)=["'\''][^"'\'']+' \
-    | sed -E 's/^(href|src)=["'\'']//g'
-  )
+# extract links
+while read -r rawlink; do
+
+[[ -z "$rawlink" ]] && continue
+
+# skip junk
+if [[ "$rawlink" =~ ^#|^javascript:|^mailto:|^tel: ]]; then
+continue
+fi
+
+FULL_URL=$(resolve_url "$CURRENT" "$rawlink")
+FULL_URL=$(normalize_url "$FULL_URL")
+
+# same domain only
+if ! is_same_domain "$FULL_URL"; then
+continue
+fi
+
+# avoid duplicates
+if [[ -z "${VISITED[$FULL_URL]:-}" && -z "${QUEUED[$FULL_URL]:-}" ]]; then
+
+QUEUE+=("$FULL_URL")
+QUEUED["$FULL_URL"]=1
+
+fi
+
+done < <(echo "$HTML" | extract_links)
 
 done
 
 echo
-echo -e "${BOLD}==============================================${RESET}"
-echo -e "${CYAN}[*] HIGH VALUE = numeric parameters only (?id=1)${RESET}"
-echo -e "${CYAN}[*] Crawled URLs: $COUNT${RESET}"
-echo -e "${CYAN}[*] Optimized for SQL Injection reconnaissance${RESET}"
-echo -e "${CYAN}[*] Use Burp / sqlmap for exploitation${RESET}"
-echo -e "${BOLD}==============================================${RESET}"
+echo -e "${BOLD}=================================================${RESET}"
+echo -e "${GREEN}[✓] Crawl Complete${RESET}"
+echo -e "${CYAN}[*] Crawled URLs : $CRAWLED${RESET}"
+echo -e "${CYAN}[*] Interesting Params : $FOUND${RESET}"
+echo -e "${CYAN}[*] Scope : $BASE_HOST${RESET}"
+echo -e "${CYAN}[*] Mode : SQL Injection Reconnaissance${RESET}"
+echo -e "${BOLD}=================================================${RESET}"
+
+echo
+echo -e "${YELLOW}[NEXT STEPS]${RESET}"
+echo "  • Test endpoints using sqlmap"
+echo "  • Analyze requests in Burp Suite"
+echo "  • Check WAF protections"
+echo "  • Fuzz parameters manually"
+echo
